@@ -12,6 +12,7 @@ use Doctrine\Common\EventManager;
 use Doctrine\Common\Proxy\Proxy;
 use Doctrine\DBAL\Connections\PrimaryReadReplicaConnection;
 use Doctrine\DBAL\LockMode;
+use Doctrine\DBAL\Types\Type;
 use Doctrine\Deprecations\Deprecation;
 use Doctrine\ORM\Cache\Persister\CachedPersister;
 use Doctrine\ORM\Event\LifecycleEventArgs;
@@ -145,6 +146,13 @@ class UnitOfWork implements PropertyChangedListener
      * @psalm-var array<int, array<string, mixed>>
      */
     private $originalEntityData = [];
+
+    /**
+     * Original data as they should be stored in database
+     *
+     * @var mixed[]
+     */
+    private $originalRawData = [];
 
     /**
      * Map of entity changes. Keys are object ids (spl_object_id).
@@ -749,7 +757,15 @@ class UnitOfWork implements PropertyChangedListener
                 }
 
                 // skip if value haven't changed
-                if ($orgValue === $actualValue) {
+                if (isset($this->originalRawData[$oid][$propName])) {
+                    $type             = Type::getType($class->fieldMappings[$propName]['type']);
+                    $platform         = $this->em->getConnection()->getDatabasePlatform();
+                    $rawValue         = $type->convertToDatabaseValue($actualValue, $platform);
+                    $originalRawValue = $this->originalRawData[$oid][$propName];
+                    if ($rawValue === $originalRawValue) {
+                        continue;
+                    }
+                } elseif ($orgValue === $actualValue) {
                     continue;
                 }
 
@@ -1251,7 +1267,8 @@ class UnitOfWork implements PropertyChangedListener
                 $this->entityDeletions[$oid],
                 $this->entityIdentifiers[$oid],
                 $this->originalEntityData[$oid],
-                $this->entityStates[$oid]
+                $this->entityStates[$oid],
+                $this->originalRawData[$oid]
             );
 
             // Entity with this $oid after deletion treated as NEW, even if the $oid
@@ -2170,7 +2187,8 @@ class UnitOfWork implements PropertyChangedListener
                     $this->entityDeletions[$oid],
                     $this->entityIdentifiers[$oid],
                     $this->entityStates[$oid],
-                    $this->originalEntityData[$oid]
+                    $this->originalEntityData[$oid],
+                    $this->originalRawData[$oid],
                 );
                 break;
             case self::STATE_NEW:
@@ -2558,6 +2576,7 @@ class UnitOfWork implements PropertyChangedListener
             $this->identityMap                    =
             $this->entityIdentifiers              =
             $this->originalEntityData             =
+            $this->originalRawData                =
             $this->entityChangeSets               =
             $this->entityStates                   =
             $this->scheduledForSynchronization    =
@@ -2913,7 +2932,7 @@ class UnitOfWork implements PropertyChangedListener
                             break;
                     }
 
-                    $this->originalEntityData[$oid][$field] = $newValue;
+                    $this->registerOriginalEntityData($oid, $class, [$field => $newValue], false);
                     $class->reflFields[$field]->setValue($entity, $newValue);
 
                     if ($assoc['inversedBy'] && $assoc['type'] & ClassMetadata::ONE_TO_ONE && $newValue !== null) {
@@ -2952,7 +2971,7 @@ class UnitOfWork implements PropertyChangedListener
                         $pColl->takeSnapshot();
                     }
 
-                    $this->originalEntityData[$oid][$field] = $pColl;
+                    $this->registerOriginalEntityData($oid, $class, [$field => $pColl], false);
                     break;
             }
         }
@@ -3080,6 +3099,13 @@ class UnitOfWork implements PropertyChangedListener
 
         foreach ($datas as $fieldName => $value) {
             $this->originalEntityData[$oid][$fieldName] = $value;
+
+            if (isset($class->fieldMappings[$fieldName])) {
+                $type                                    = Type::getType($class->fieldMappings[$fieldName]['type']);
+                $platform                                = $this->em->getConnection()->getDatabasePlatform();
+                $rawValue                                = $type->convertToDatabaseValue($value, $platform);
+                $this->originalRawData[$oid][$fieldName] = $rawValue;
+            }
         }
     }
     /**
