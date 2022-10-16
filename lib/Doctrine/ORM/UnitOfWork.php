@@ -709,8 +709,8 @@ class UnitOfWork implements PropertyChangedListener
         if (! isset($this->originalEntityData[$oid])) {
             // Entity is either NEW or MANAGED but not yet fully persisted (only has an id).
             // These result in an INSERT.
-            $this->originalEntityData[$oid] = $actualData;
-            $changeSet                      = [];
+            $this->registerOriginalEntityData($oid, $class, $actualData);
+            $changeSet = [];
 
             foreach ($actualData as $propName => $actualValue) {
                 if (! isset($class->associationMappings[$propName])) {
@@ -810,9 +810,9 @@ class UnitOfWork implements PropertyChangedListener
             }
 
             if ($changeSet) {
-                $this->entityChangeSets[$oid]   = $changeSet;
-                $this->originalEntityData[$oid] = $actualData;
-                $this->entityUpdates[$oid]      = $entity;
+                $this->entityChangeSets[$oid] = $changeSet;
+                $this->registerOriginalEntityData($oid, $class, $actualData);
+                $this->entityUpdates[$oid] = $entity;
             }
         }
 
@@ -832,9 +832,9 @@ class UnitOfWork implements PropertyChangedListener
                 $val instanceof PersistentCollection &&
                 $val->isDirty()
             ) {
-                $this->entityChangeSets[$oid]   = [];
-                $this->originalEntityData[$oid] = $actualData;
-                $this->entityUpdates[$oid]      = $entity;
+                $this->entityChangeSets[$oid] = [];
+                $this->registerOriginalEntityData($oid, $class, $actualData);
+                $this->entityUpdates[$oid] = $entity;
             }
         }
     }
@@ -1099,7 +1099,7 @@ class UnitOfWork implements PropertyChangedListener
                 $this->entityUpdates[$oid]    = $entity;
             }
 
-            $this->originalEntityData[$oid] = $actualData;
+            $this->registerOriginalEntityData($oid, $class, $actualData);
         }
     }
 
@@ -1144,9 +1144,9 @@ class UnitOfWork implements PropertyChangedListener
 
                 $class->reflFields[$idField]->setValue($entity, $idValue);
 
-                $this->entityIdentifiers[$oid]            = [$idField => $idValue];
-                $this->entityStates[$oid]                 = self::STATE_MANAGED;
-                $this->originalEntityData[$oid][$idField] = $idValue;
+                $this->entityIdentifiers[$oid] = [$idField => $idValue];
+                $this->entityStates[$oid]      = self::STATE_MANAGED;
+                $this->registerOriginalEntityData($oid, $class, [$idField => $idValue], false);
 
                 $this->addToIdentityMap($entity);
             }
@@ -1188,8 +1188,8 @@ class UnitOfWork implements PropertyChangedListener
                 $value = $this->getSingleIdentifierValue($origValue);
             }
 
-            $identifier[$idField]                     = $value ?? $origValue;
-            $this->originalEntityData[$oid][$idField] = $origValue;
+            $identifier[$idField] = $value ?? $origValue;
+            $this->registerOriginalEntityData($oid, $class, [$idField => $origValue], false);
         }
 
         $this->entityStates[$oid]      = self::STATE_MANAGED;
@@ -2725,14 +2725,14 @@ class UnitOfWork implements PropertyChangedListener
                 $entity->injectObjectManager($this->em, $class);
             }
 
-            $this->originalEntityData[$oid] = $data;
+            $this->registerOriginalEntityData($oid, $class, $data);
         } else {
             $entity = $this->newInstance($class);
             $oid    = spl_object_id($entity);
 
-            $this->entityIdentifiers[$oid]  = $id;
-            $this->entityStates[$oid]       = self::STATE_MANAGED;
-            $this->originalEntityData[$oid] = $data;
+            $this->entityIdentifiers[$oid] = $id;
+            $this->entityStates[$oid]      = self::STATE_MANAGED;
+            $this->registerOriginalEntityData($oid, $class, $data);
 
             $this->identityMap[$class->rootEntityName][$idHash] = $entity;
 
@@ -2783,7 +2783,7 @@ class UnitOfWork implements PropertyChangedListener
                     if (! $assoc['isOwningSide']) {
                         // use the given entity association
                         if (isset($data[$field]) && is_object($data[$field]) && isset($this->entityStates[spl_object_id($data[$field])])) {
-                            $this->originalEntityData[$oid][$field] = $data[$field];
+                            $this->registerOriginalEntityData($oid, $class, [$field => $data[$field]], false);
 
                             $class->reflFields[$field]->setValue($entity, $data[$field]);
                             $targetClass->reflFields[$assoc['mappedBy']]->setValue($data[$field], $entity);
@@ -2800,7 +2800,7 @@ class UnitOfWork implements PropertyChangedListener
                     // use the entity association
                     if (isset($data[$field]) && is_object($data[$field]) && isset($this->entityStates[spl_object_id($data[$field])])) {
                         $class->reflFields[$field]->setValue($entity, $data[$field]);
-                        $this->originalEntityData[$oid][$field] = $data[$field];
+                        $this->registerOriginalEntityData($oid, $class, [$field => $data[$field]], false);
 
                         break;
                     }
@@ -2830,7 +2830,7 @@ class UnitOfWork implements PropertyChangedListener
                     if (! $associatedId) {
                         // Foreign key is NULL
                         $class->reflFields[$field]->setValue($entity, null);
-                        $this->originalEntityData[$oid][$field] = null;
+                        $this->registerOriginalEntityData($oid, $class, [$field => null], false);
 
                         break;
                     }
@@ -2934,7 +2934,7 @@ class UnitOfWork implements PropertyChangedListener
                         $data[$field]->setOwner($entity, $assoc);
 
                         $class->reflFields[$field]->setValue($entity, $data[$field]);
-                        $this->originalEntityData[$oid][$field] = $data[$field];
+                        $this->registerOriginalEntityData($oid, $class, [$field => $data[$field]], false);
 
                         break;
                     }
@@ -3050,7 +3050,8 @@ class UnitOfWork implements PropertyChangedListener
      */
     public function setOriginalEntityData($entity, array $data)
     {
-        $this->originalEntityData[spl_object_id($entity)] = $data;
+        $class = $this->em->getClassMetadata(get_class($entity));
+        $this->registerOriginalEntityData(spl_object_id($entity), $class, $data);
     }
 
     /**
@@ -3070,6 +3071,17 @@ class UnitOfWork implements PropertyChangedListener
         $this->originalEntityData[$oid][$property] = $value;
     }
 
+    /** @param mixed[] $datas */
+    private function registerOriginalEntityData(int $oid, ClassMetadata $class, array $datas, bool $removeExisting = true): void
+    {
+        if ($removeExisting) {
+            $this->originalEntityData[$oid] = [];
+        }
+
+        foreach ($datas as $fieldName => $value) {
+            $this->originalEntityData[$oid][$fieldName] = $value;
+        }
+    }
     /**
      * Gets the identifier of an entity.
      * The returned value is always an array of identifier values. If the entity
@@ -3260,9 +3272,9 @@ class UnitOfWork implements PropertyChangedListener
     {
         $oid = spl_object_id($entity);
 
-        $this->entityIdentifiers[$oid]  = $id;
-        $this->entityStates[$oid]       = self::STATE_MANAGED;
-        $this->originalEntityData[$oid] = $data;
+        $this->entityIdentifiers[$oid] = $id;
+        $this->entityStates[$oid]      = self::STATE_MANAGED;
+        $this->registerOriginalEntityData($oid, $this->em->getClassMetadata(get_class($entity)), $data);
 
         $this->addToIdentityMap($entity);
 
